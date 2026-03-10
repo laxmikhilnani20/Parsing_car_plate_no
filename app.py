@@ -404,22 +404,22 @@ def main():
     # Header
     st.markdown('<h1 class="main-header">🚗 ParkQ - Indian License Plate Detection</h1>', unsafe_allow_html=True)
     
+    # Auto-load models on first run
+    if not st.session_state.models_loaded:
+        with st.spinner("🔄 Loading AI models... Please wait"):
+            models = load_models()
+            if all(model is not None for model in models):
+                (st.session_state.yolo_model, st.session_state.easy_reader, 
+                 st.session_state.trocr_processor, st.session_state.trocr_model, 
+                 st.session_state.device) = models
+                st.session_state.models_loaded = True
+                st.success("✅ Models loaded successfully!")
+    
     # Sidebar
     with st.sidebar:
         st.header("🎛️ Configuration")
         
-        # Load models
-        if not st.session_state.models_loaded:
-            if st.button("🔄 Load AI Models", type="primary"):
-                models = load_models()
-                if all(model is not None for model in models):
-                    (st.session_state.yolo_model, st.session_state.easy_reader, 
-                     st.session_state.trocr_processor, st.session_state.trocr_model, 
-                     st.session_state.device) = models
-                    st.session_state.models_loaded = True
-                    st.success("✅ Models loaded successfully!")
-                    st.rerun()
-        else:
+        if st.session_state.models_loaded:
             st.success("✅ Models Ready")
         
         if st.session_state.models_loaded:
@@ -448,34 +448,8 @@ def main():
     
     # Main content
     if not st.session_state.models_loaded:
-        st.warning("⚠️ Please load the AI models from the sidebar before proceeding.")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown("""
-            <div class="metric-card">
-                <h3>🚗 Vehicle Detection</h3>
-                <p>YOLOv8n for fast and accurate vehicle detection</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("""
-            <div class="metric-card">
-                <h3>🔍 Dual OCR Engine</h3>
-                <p>EasyOCR + TrOCR for maximum text recognition</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col3:
-            st.markdown("""
-            <div class="metric-card">
-                <h3>🎯 Indian Validation</h3>
-                <p>Strict format validation for Indian license plates</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        return
+        st.info("⏳ Loading AI models... Please wait while we initialize the system.")
+        st.stop()  # Stop execution until models are loaded
     
     # Video upload and processing
     st.header("📹 Upload Video for Processing")
@@ -511,9 +485,9 @@ def main():
         with col4:
             st.metric("🖼️ Total Frames", total_frames)
         
-        # Process video button
-        if st.button("🚀 Process Video", type="primary"):
-            process_video(video_path, frame_skip, confidence_threshold, max_frames)
+        # Auto-process video immediately
+        st.info("🚀 Processing video automatically...")
+        process_video(video_path, frame_skip, confidence_threshold, max_frames)
         
         # Clean up
         try:
