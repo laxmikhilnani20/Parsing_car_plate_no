@@ -9,6 +9,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
 import warnings
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 warnings.filterwarnings("ignore")
 
 import torch
@@ -424,12 +426,14 @@ def main():
         
         if st.session_state.models_loaded:
             st.subheader("⚙️ Processing Settings")
-            frame_skip = st.slider("Frame Skip (for speed)", 1, 30, 10, 
+            frame_skip = st.slider("Frame Skip (for speed)", 5, 30, 15, 
                                   help="Process every Nth frame for faster processing")
             confidence_threshold = st.slider("Detection Threshold", 0.0, 1.0, 0.3, 0.1,
                                             help="Minimum confidence for detections")
-            max_frames = st.slider("Max Frames to Process", 10, 500, 100,
+            max_frames = st.slider("Max Frames to Process", 10, 200, 80,
                                  help="Limit processing for large videos")
+            parallel_workers = st.slider("Parallel Workers", 1, 4, 2,
+                                        help="Number of frames to process simultaneously")
         
         st.subheader("ℹ️ About")
         st.info("""
@@ -487,7 +491,7 @@ def main():
         
         # Auto-process video immediately
         st.info("🚀 Processing video automatically...")
-        process_video(video_path, frame_skip, confidence_threshold, max_frames)
+        process_video(video_path, frame_skip, confidence_threshold, max_frames, parallel_workers)
         
         # Clean up
         try:
@@ -495,7 +499,36 @@ def main():
         except:
             pass
 
-def process_video(video_path, frame_skip, confidence_threshold, max_frames):
+def process_single_frame(frame, frame_number, fps, yolo_model, easy_reader, trocr_processor, trocr_model, device):
+    """Process a single frame for license plate detection - thread-safe version."""
+    try:
+        result = process_video_frame(frame, yolo_model, easy_reader, trocr_processor, trocr_model, device)
+        
+        frame_info = {
+            "frame_number": frame_number,
+            "time_seconds": frame_number / fps,
+            "plate_detected": result['plate_number'] is not None,
+            "plate_number": result['plate_number'],
+            "confidence": result['confidence'],
+            "score": result['score'],
+            "is_valid_indian": result['is_valid'],
+            "method": result['method']
+        }
+        
+        return frame_info
+    except Exception as e:
+        return {
+            "frame_number": frame_number,
+            "time_seconds": frame_number / fps,
+            "plate_detected": False,
+            "plate_number": None,
+            "confidence": 0.0,
+            "score": 0.0,
+            "is_valid_indian": False,
+            "method": f"error: {str(e)[:50]}"
+        }
+
+def process_video(video_path, frame_skip, confidence_threshold, max_frames, parallel_workers=2):
     """Process the uploaded video and display results."""
     
     # Create progress containers
@@ -529,7 +562,12 @@ def process_video(video_path, frame_skip, confidence_threshold, max_frames):
             st.subheader("📊 Live Stats")
             stats_placeholder = st.empty()
     
-    # Process frames
+    # Process frames with parallel processing
+    frames_to_process = []
+    frame_numbers = []
+    
+    print(f"🔄 Collecting frames (every {frame_skip}th frame)...")
+    
     while processed_frames < max_frames and frame_count < total_frames:
         ret, frame = cap.read()
         if not ret:
@@ -540,50 +578,67 @@ def process_video(video_path, frame_skip, confidence_threshold, max_frames):
             frame_count += 1
             continue
         
+        frames_to_process.append(frame.copy())
+        frame_numbers.append(frame_count)
         frame_count += 1
         processed_frames += 1
-        
-        # Update progress
-        progress = min(processed_frames / max_frames, frame_count / total_frames)
-        progress_bar.progress(progress)
-        status_text.text(f"Processing frame {frame_count}/{total_frames} (Processed: {processed_frames})")
-        
-        # Process frame
-        result = process_video_frame(
-            frame, 
-            st.session_state.yolo_model,
-            st.session_state.easy_reader,
-            st.session_state.trocr_processor,
-            st.session_state.trocr_model,
-            st.session_state.device
-        )
-        
-        frame_info = {
-            "frame_number": frame_count,
-            "time_seconds": frame_count / fps,
-            "plate_detected": result['plate_number'] is not None,
-            "plate_number": result['plate_number'],
-            "confidence": result['confidence'],
-            "score": result['score'],
-            "is_valid_indian": result['is_valid'],
-            "method": result['method']
-        }
-        
-        frame_results.append(frame_info)
-        
-        # Track detections
-        if result['plate_number']:
-            all_detections.append(frame_info)
-            
-            if result['is_valid']:
-                valid_detections.append(frame_info)
-        
-        # Update live results every 5 frames
-        if processed_frames % 5 == 0:
-            update_live_results(results_placeholder, stats_placeholder, 
-                              frame_results, all_detections, valid_detections, processed_frames)
     
     cap.release()
+    
+    print(f"🚀 Processing {len(frames_to_process)} frames with {parallel_workers} parallel workers...")
+    
+    # Process frames in parallel batches
+    batch_size = parallel_workers * 2  # Process in batches to manage memory
+    completed_results = []
+    
+    for batch_start in range(0, len(frames_to_process), batch_size):
+        batch_end = min(batch_start + batch_size, len(frames_to_process))
+        batch_frames = frames_to_process[batch_start:batch_end]
+        batch_numbers = frame_numbers[batch_start:batch_end]
+        
+        # Update progress
+        progress = batch_end / len(frames_to_process)
+        progress_bar.progress(progress)
+        status_text.text(f"Processing frames {batch_start + 1}-{batch_end} of {len(frames_to_process)} (Parallel batch)")
+        
+        # Process batch in parallel
+        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            future_to_frame = {
+                executor.submit(
+                    process_single_frame, 
+                    frame, 
+                    frame_num, 
+                    fps,
+                    st.session_state.yolo_model,
+                    st.session_state.easy_reader,
+                    st.session_state.trocr_processor,
+                    st.session_state.trocr_model,
+                    st.session_state.device
+                ): (frame, frame_num) 
+                for frame, frame_num in zip(batch_frames, batch_numbers)
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_frame):
+                try:
+                    frame_info = future.result()
+                    completed_results.append(frame_info)
+                    
+                    # Track detections
+                    if frame_info['plate_detected']:
+                        all_detections.append(frame_info)
+                        if frame_info['is_valid_indian']:
+                            valid_detections.append(frame_info)
+                
+                except Exception as e:
+                    print(f"❌ Error in parallel processing: {str(e)}")
+        
+        # Update live results every batch
+        update_live_results(results_placeholder, stats_placeholder, 
+                          completed_results, all_detections, valid_detections, len(completed_results))
+    
+    # Sort results by frame number
+    frame_results = sorted(completed_results, key=lambda x: x['frame_number'])
     processing_time = time.time() - start_time
     
     # Final results
@@ -591,7 +646,7 @@ def process_video(video_path, frame_skip, confidence_threshold, max_frames):
     status_text.text("✅ Processing complete!")
     
     display_final_results(frame_results, all_detections, valid_detections, 
-                         processed_frames, processing_time, fps)
+                         len(frame_results), processing_time, fps)
 
 def update_live_results(results_placeholder, stats_placeholder, 
                        frame_results, all_detections, valid_detections, processed_frames):
